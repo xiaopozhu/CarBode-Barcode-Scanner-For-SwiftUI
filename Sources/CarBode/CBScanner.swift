@@ -69,7 +69,7 @@ public struct CBScanner: UIViewRepresentable {
     }
 
     public static func dismantleUIView(_ uiView: CameraPreview, coordinator: ()) {
-        uiView.session?.stopRunning()
+        uiView.cleanup()
     }
 
     public func updateUIView(_ uiView: CameraPreview, context: UIViewRepresentableContext<CBScanner>) {
@@ -84,13 +84,11 @@ public struct CBScanner: UIViewRepresentable {
 
         if isActive {
             if !(uiView.session?.isRunning ?? false) {
-                DispatchQueue.global(qos: .userInitiated).async { 
-                    uiView.session?.startRunning()
-                }
+                uiView.startSession()
             }
             uiView.updateCameraView()
         } else {
-            uiView.session?.stopRunning()
+            uiView.stopSession()
         }
     }
 

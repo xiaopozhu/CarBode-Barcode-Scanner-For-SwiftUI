@@ -34,6 +34,8 @@ public class CameraPreview: UIView {
     var removeFrameTimer: Timer?
     
     var lastScannedBarcode: BarcodeData?
+    
+    private let sessionQueue = DispatchQueue(label: "camera.session.queue", qos: .userInitiated)
 
     init() {
         super.init(frame: .zero)
@@ -52,74 +54,75 @@ public class CameraPreview: UIView {
     }
 
     func setSupportedBarcode(supportBarcode: [AVMetadataObject.ObjectType]) {
+        guard self.supportBarcode != supportBarcode else { return }
         self.supportBarcode = supportBarcode
 
-        guard let session = session else { return }
+        sessionQueue.async {
+            guard let session = self.session else { return }
 
-        session.beginConfiguration()
+            session.beginConfiguration()
 
-        let metadataOutput = AVCaptureMetadataOutput()
+            // Remove existing metadata outputs to avoid duplicates
+            session.outputs.forEach { output in
+                if output is AVCaptureMetadataOutput {
+                    session.removeOutput(output)
+                }
+            }
 
-        if session.canAddOutput(metadataOutput) {
-            session.addOutput(metadataOutput)
+            let metadataOutput = AVCaptureMetadataOutput()
+            if session.canAddOutput(metadataOutput) {
+                session.addOutput(metadataOutput)
+                metadataOutput.metadataObjectTypes = supportBarcode
+                metadataOutput.setMetadataObjectsDelegate(self, queue: DispatchQueue.main)
+            }
 
-            metadataOutput.metadataObjectTypes = supportBarcode
-            metadataOutput.setMetadataObjectsDelegate(self, queue: DispatchQueue.main)
+            session.commitConfiguration()
         }
-
-        if session.canAddOutput(metadataOutput) {
-            session.addOutput(metadataOutput)
-
-            metadataOutput.metadataObjectTypes = supportBarcode
-            metadataOutput.setMetadataObjectsDelegate(self, queue: DispatchQueue.main)
-        }
-        session.commitConfiguration()
     }
 
     func setCamera(position: AVCaptureDevice.Position) {
-
-        if cameraPosition == position { return }
+        guard cameraPosition != position else { return }
         cameraPosition = position
 
-        guard let session = session else { return }
+        sessionQueue.async {
+            guard let session = self.session else { return }
 
-        session.beginConfiguration()
-        if let input = cameraInput {
-            session.removeInput(input)
-            cameraInput = nil
-        }
-
-        let deviceDiscoverySession = AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInWideAngleCamera], mediaType: AVMediaType.video, position: cameraPosition)
-
-        let camera = deviceDiscoverySession.devices.first
-        if let selectedCamera = camera {
-            if let input = try? AVCaptureDeviceInput(device: selectedCamera) {
-                if session.canAddInput(input) {
-                    session.addInput(input)
-                    cameraInput = input
-                }
+            session.beginConfiguration()
+            
+            // Remove current input
+            if let input = self.cameraInput {
+                session.removeInput(input)
+                self.cameraInput = nil
             }
-        }
 
-        session.commitConfiguration()
+            // Add new camera input
+            let discovery = AVCaptureDevice.DiscoverySession(
+                deviceTypes: [.builtInWideAngleCamera], 
+                mediaType: .video, 
+                position: self.cameraPosition
+            )
+            
+            if let camera = discovery.devices.first,
+               let input = try? AVCaptureDeviceInput(device: camera),
+               session.canAddInput(input) {
+                session.addInput(input)
+                self.cameraInput = input
+                self.selectedCamera = camera
+            }
+
+            session.commitConfiguration()
+        }
     }
 
     func setTorchLight(isOn: Bool) {
-
-        if torchLightIsOn == isOn { return }
-
+        guard torchLightIsOn != isOn else { return }
+        
         torchLightIsOn = isOn
-        if let camera = selectedCamera {
-            if camera.hasTorch {
-                try? camera.lockForConfiguration()
-                if isOn {
-                    camera.torchMode = .on
-                } else {
-                    camera.torchMode = .off
-                }
-                camera.unlockForConfiguration()
-            }
-        }
+        guard let camera = selectedCamera, camera.hasTorch else { return }
+        
+        try? camera.lockForConfiguration()
+        camera.torchMode = isOn ? .on : .off
+        camera.unlockForConfiguration()
     }
 
     private func checkCameraAuthorizationStatus() {
@@ -128,7 +131,7 @@ public class CameraPreview: UIView {
             setupCamera()
         } else {
             AVCaptureDevice.requestAccess(for: .video) { granted in
-                DispatchQueue.main.sync {
+                DispatchQueue.main.async {
                     if granted {
                         self.setupCamera()
                     }
@@ -165,8 +168,7 @@ public class CameraPreview: UIView {
                 self.selectedCamera = selectedCamera
                 self.backgroundColor = UIColor.gray
                 
-                DispatchQueue.global().async {
-                    Thread.sleep(forTimeInterval: 0.2)
+                sessionQueue.async {
                     session.startRunning()
                     DispatchQueue.main.async {
                         let previewLayer = AVCaptureVideoPreviewLayer(session: session)
@@ -234,6 +236,38 @@ public class CameraPreview: UIView {
         #else
             previewLayer?.frame = self.bounds
         #endif
+    }
+    
+    func cleanup() {
+        sessionQueue.async {
+            self.session?.stopRunning()
+        }
+        
+        DispatchQueue.main.async {
+            self.removeFrameTimer?.invalidate()
+            self.removeFrameTimer = nil
+            self.previewLayer?.removeFromSuperlayer()
+            self.previewLayer = nil
+            self.shapeLayer?.removeFromSuperlayer()
+            self.shapeLayer = nil
+        }
+        
+        // Clear references immediately
+        session = nil
+        selectedCamera = nil
+        cameraInput = nil
+    }
+    
+    func startSession() {
+        sessionQueue.async {
+            self.session?.startRunning()
+        }
+    }
+    
+    func stopSession() {
+        sessionQueue.async {
+            self.session?.stopRunning()
+        }
     }
 }
 
